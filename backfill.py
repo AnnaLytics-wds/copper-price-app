@@ -2,12 +2,13 @@
 """一键回填历史电解铜价格到 Supabase。
 
 用法：
-    python backfill.py
+    python backfill.py                 # 回填最近两年（首次初始化用）
+    python backfill.py --days 45       # 只回填最近 45 天（每周自动更新用）
     python backfill.py 2024-08-10 2026-08-10
 """
 
+import argparse
 import os
-import sys
 import tomllib
 from datetime import date, timedelta
 from pathlib import Path
@@ -36,10 +37,29 @@ def load_supabase_client():
     return create_client(url, key)
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="回填电解铜历史价格到 Supabase。")
+    parser.add_argument(
+        "dates",
+        nargs="*",
+        help="可选的 起始日期 结束日期，例如 2024-08-10 2026-08-10",
+    )
+    parser.add_argument(
+        "--days",
+        type=int,
+        help="只回填最近 N 天，每周自动更新建议用 45",
+    )
+    return parser.parse_args()
+
+
 def main():
-    args = sys.argv[1:]
-    if len(args) >= 2:
-        start_date, end_date = args[0], args[1]
+    args = parse_args()
+    if args.days:
+        end = date.today()
+        start = end - timedelta(days=args.days)
+        start_date, end_date = start.isoformat(), end.isoformat()
+    elif len(args.dates) == 2:
+        start_date, end_date = args.dates[0], args.dates[1]
     else:
         end = date.today()
         start = end - timedelta(days=365 * 2)
