@@ -102,6 +102,8 @@ if st.session_state.update_message:
 st.subheader("历史价格趋势")
 if history.empty:
     st.info("暂无历史数据，点击上方按钮抓取第一条价格。")
+elif len(history) < 2:
+    st.info("历史数据不足 2 条，暂时画不出趋势线；请运行 backfill.py 回填过去两年的价格。")
 else:
     st.line_chart(history.set_index("date")["price"])
     st.caption(f"共 {len(history)} 条价格记录")

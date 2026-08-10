@@ -2,6 +2,8 @@
 """自动获取国家统计局最新一期“电解铜（1#）”价格。"""
 
 import re
+import time
+from datetime import date, datetime
 from urllib.parse import urljoin
 
 import requests
@@ -24,9 +26,19 @@ HEADERS = {
 
 def fetch_html(url):
     """请求网页，并按照页面声明或常见编码解码 HTML。"""
-    resp = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
-    resp.raise_for_status()
-    raw = resp.content
+    last_exc = None
+    for attempt in range(3):
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+            resp.raise_for_status()
+            raw = resp.content
+            break
+        except requests.RequestException as exc:
+            last_exc = exc
+            if attempt < 2:
+                time.sleep(2)
+    else:
+        raise last_exc
 
     # 统计局新版页面是 UTF-8，历史页面多为 gb2312/gbk。
     encodings = []
@@ -198,6 +210,129 @@ def get_latest_copper_price():
         "price": price,
         "article_url": article_url,
     }
+
+
+def _to_date(value):
+    """把 "YYYY-MM-DD" 字符串或 date 对象统一成 date。"""
+    if isinstance(value, str):
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    return value
+
+
+def fetch_copper_price_history(start_date, end_date, verbose=False):
+    """抓取 start_date 到 end_date（含）之间每一期的电解铜价格记录。
+
+    返回按日期升序排列的记录列表，每项包含 date、display_date、price。
+    """
+    start = _to_date(start_date)
+    end = _to_date(end_date)
+    if start > end:
+        raise ValueError("start_date 不能晚于 end_date")
+
+    # 第一步：翻目录页，收集日期范围内的文章链接。
+    candidates = []
+    seen_urls = set()
+    page = 0
+    while page <= 60:
+        page_url = LIST_URL if page == 0 else f"{LIST_URL}index_{page}.html"
+        page_html = fetch_html(page_url)
+        soup = BeautifulSoup(page_html, "html.parser")
+
+        items = []
+        for li in soup.select(".list-content ul li"):
+            a = li.find("a")
+            span = li.find("span")
+            if not a:
+                continue
+            parsed = parse_list_date(span.get_text(strip=True) if span else "")
+            if not parsed:
+                continue
+            items.append(
+                (
+                    date(*parsed),
+                    a.get_text(" ", strip=True),
+                    urljoin(LIST_URL, a["href"].strip()),
+                )
+            )
+
+        if not items:
+            break
+
+        # 目录页按日期倒序，本页最后一条都早于 start 时，后面不用再翻。
+        for item_date, title, href in items:
+            if item_date < start or item_date > end:
+                continue
+            if KEYWORD not in title or href in seen_urls:
+                continue
+            seen_urls.add(href)
+            candidates.append((item_date, title, href))
+
+        if items[-1][0] < start:
+            break
+        page += 1
+
+    # 第二步：逐篇抓文章，提取价格和发布日期，按日期去重。
+    records = []
+    seen_dates = set()
+    total = len(candidates)
+    for index, (item_date, title, href) in enumerate(candidates, 1):
+        if verbose:
+            print(f"正在抓取 {index}/{total}：{title}", flush=True)
+        article_html = fetch_html(href)
+
+        display_date = extract_publish_date(article_html, title)
+        date_iso = to_iso_date(display_date) or item_date.isoformat()
+        price = extract_copper_price(article_html)
+        if not date_iso or date_iso in seen_dates or price is None:
+            if verbose:
+                print(f"跳过 {title}：未提取到有效价格或日期", flush=True)
+            continue
+
+        seen_dates.add(date_iso)
+        records.append(
+            {"date": date_iso, "display_date": display_date, "price": price}
+        )
+
+    records.sort(key=lambda item: item["date"])
+    return records
+
+
+def _supabase_client_from_env():
+    """从环境变量读取 Supabase 配置并创建客户端。"""
+    import os
+
+    try:
+        from supabase import create_client
+    except ImportError:
+        raise RuntimeError("缺少 supabase 库，请先执行 pip install supabase")
+
+    url = os.environ.get("SUPABASE_URL")
+    key = os.environ.get("SUPABASE_KEY")
+    if not url or not key:
+        raise RuntimeError("未找到 SUPABASE_URL / SUPABASE_KEY 环境变量")
+    return create_client(url, key)
+
+
+def backfill_copper_prices(start_date, end_date, supabase_client=None, verbose=True):
+    """抓取历史电解铜价格并批量写入 Supabase（按 date 去重/覆盖）。
+
+    返回写入（或更新）的记录条数。
+    """
+    records = fetch_copper_price_history(start_date, end_date, verbose=verbose)
+    if not records:
+        if verbose:
+            print("没有找到该日期范围内的电解铜价格记录。", flush=True)
+        return 0
+
+    if supabase_client is None:
+        supabase_client = _supabase_client_from_env()
+
+    rows = [{"date": item["date"], "price": float(item["price"])} for item in records]
+    for i in range(0, len(rows), 50):
+        supabase_client.table("copper_prices").upsert(
+            rows[i : i + 50], on_conflict="date"
+        ).execute()
+    return len(records)
 
 
 def main():
