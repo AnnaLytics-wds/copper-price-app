@@ -33,3 +33,10 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: python backfill.py --days 45
+
+      - name: 推送最新价格到微信
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SERVERCHAN_SENDKEYS: ${{ secrets.SERVERCHAN_SENDKEYS }}
+        run: python notify.py
